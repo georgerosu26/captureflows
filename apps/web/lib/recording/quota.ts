@@ -1,0 +1,134 @@
+/// <reference types="@cloudflare/workers-types" />
+
+import {
+  ACCOUNT_LIMITS,
+  ensurePersonalWorkspace,
+  type EffectiveLimits,
+  getEffectiveLimitsForUser as getEffectiveLimitsForUserD1,
+  getCurrentWorkspaceId,
+  getPersonalWorkspaceForUser,
+  getWorkspaceById,
+  isSelfHosted,
+  isWorkspaceMember,
+  totalStorageForUser as totalStorageForUserD1,
+} from "@captureflow/quota";
+import { memoryTotalStorageForUser } from "./db-memory";
+import { getCloudflareEnv } from "./cf-env";
+import { isDevDevice } from "./dev-allowlist";
+
+export { ACCOUNT_LIMITS };
+export type { EffectiveLimits };
+
+export async function getEffectiveLimitsForUser(
+  userId: string,
+): Promise<EffectiveLimits> {
+  const env = await getCloudflareEnv();
+  if (!env?.DB) {
+    return {
+      storageBytes: ACCOUNT_LIMITS.totalStorageBytes,
+      proSubscriptionActive: false,
+    };
+  }
+  return getEffectiveLimitsForUserD1(env.DB, userId, {
+    selfHosted: isSelfHosted(env),
+  });
+}
+
+export async function totalStorageForUser(userId: string): Promise<number> {
+  const env = await getCloudflareEnv();
+  if (!env?.DB) return memoryTotalStorageForUser(userId);
+  return totalStorageForUserD1(env.DB, userId);
+}
+
+/*
+ * Whether committing `addedBytes` for this artifact would overrun the account
+ * it is charged to. One place for the rule, because both finalize routes need
+ * it and storage is now the only ceiling either of them enforces. Anonymous
+ * rows have no account to charge, and a dev device is unmetered.
+ */
+export async function exceedsStorage(
+  deviceId: string,
+  row: { userId: string | null; workspaceId: string | null },
+  addedBytes: number,
+): Promise<boolean> {
+  if (!row.userId) return false;
+  if (await isDevDevice(deviceId)) return false;
+  const quotaUserId = row.workspaceId
+    ? ((await getWorkspaceOwnerUserId(row.workspaceId)) ?? row.userId)
+    : row.userId;
+  const [used, limits] = await Promise.all([
+    totalStorageForUser(quotaUserId),
+    getEffectiveLimitsForUser(quotaUserId),
+  ]);
+  return used + addedBytes > limits.storageBytes;
+}
+
+export async function resolveUserWorkspaceId(
+  userId: string,
+): Promise<string | null> {
+  const env = await getCloudflareEnv();
+  if (!env?.DB) return null;
+  const existing = await getPersonalWorkspaceForUser(env.DB, userId);
+  if (existing) return existing.id;
+
+  const profile = await env.DB.prepare(
+    `SELECT name FROM users WHERE id = ?1 LIMIT 1`,
+  )
+    .bind(userId)
+    .first<{ name: string | null }>();
+  const workspace = await ensurePersonalWorkspace(
+    env.DB,
+    userId,
+    profile?.name ?? null,
+  );
+  return workspace.id;
+}
+
+/*
+ * Where an upload lands when the client names no workspace. That is every
+ * upload from the extension, which sends none, and any desktop upload made
+ * before a workspace was picked there — so before this, switching workspace on
+ * the site changed nothing about where a recording went.
+ *
+ * Membership is re-checked rather than trusted: the stored id is whatever was
+ * last chosen, and the user may have been removed from it since.
+ */
+export async function resolveUploadWorkspaceId(
+  userId: string,
+): Promise<string | null> {
+  const env = await getCloudflareEnv();
+  if (env?.DB) {
+    const current = await getCurrentWorkspaceId(env.DB, userId);
+    if (current && (await isWorkspaceMember(env.DB, current, userId))) {
+      return current;
+    }
+  }
+  return resolveUserWorkspaceId(userId);
+}
+
+// Pro is per-user: team uploads draw down the workspace owner's cap, not the uploader's.
+export async function getWorkspaceOwnerUserId(
+  workspaceId: string,
+): Promise<string | null> {
+  const env = await getCloudflareEnv();
+  if (!env?.DB) return null;
+  const row = await getWorkspaceById(env.DB, workspaceId);
+  return row?.owner_user_id ?? null;
+}
+
+export async function getWorkspaceForUpload(workspaceId: string) {
+  const env = await getCloudflareEnv();
+  if (!env?.DB) return null;
+  return getWorkspaceById(env.DB, workspaceId);
+}
+
+// Returns null for both "not a member" and "no such workspace" so clients can't probe workspace ids.
+export async function validateWorkspaceMembership(
+  userId: string,
+  workspaceId: string,
+): Promise<string | null> {
+  const env = await getCloudflareEnv();
+  if (!env?.DB) return null;
+  const ok = await isWorkspaceMember(env.DB, workspaceId, userId);
+  return ok ? workspaceId : null;
+}

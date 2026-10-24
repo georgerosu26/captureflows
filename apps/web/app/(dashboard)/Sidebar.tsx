@@ -1,0 +1,91 @@
+import Link from "next/link";
+import {
+  countWorkspaceRecordings,
+  isSelfHosted,
+  listMembers,
+  totalStorageForUser,
+  UNLIMITED_STORAGE_BYTES,
+} from "@captureflow/quota";
+import type { AvatarGroupItem } from "@captureflow/ui";
+import { AppIcon } from "@/components/brand-mark";
+import { RecordButton } from "./RecordButton";
+import { initials as initialsOf } from "@/lib/format";
+import { getAppWebEnv } from "@/lib/cf-env";
+import { requireSession } from "@/lib/session-guard";
+import { resolveCurrentWorkspace } from "@/lib/current-workspace";
+import { getEffectiveStorageLimit } from "@/lib/user-quota";
+import { StorageUsage } from "../StorageUsage";
+import { SidebarNav } from "./SidebarNav";
+import { WorkspaceMembersStack } from "./WorkspaceMembersStack";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
+
+export async function Sidebar() {
+  const session = await requireSession();
+  const env = await getAppWebEnv();
+  // Storage is owner-scoped: sums recording + screenshot bytes across the user's owned
+  // workspaces (uploads into others' workspaces don't count against their cap).
+  const [current, usedBytes, limitBytes] = await Promise.all([
+    resolveCurrentWorkspace(session.user.id, session.user.name ?? null),
+    env?.DB ? totalStorageForUser(env.DB, session.user.id) : Promise.resolve(0),
+    getEffectiveStorageLimit(session.user.id),
+  ]);
+
+  const [members, recordingCount] = env?.DB
+    ? await Promise.all([
+        listMembers(env.DB, current.workspace.id),
+        countWorkspaceRecordings(env.DB, current.workspace.id),
+      ])
+    : [[], 0];
+  const isOwner = current.role === "owner";
+  const selfHosted = isSelfHosted(env);
+  const memberItems: AvatarGroupItem[] = members.map((m) => {
+    const display = m.name?.trim() || m.email;
+    return {
+      key: m.user_id,
+      label: display,
+      initials: initialsOf(display),
+      image: m.image,
+    };
+  });
+
+  return (
+    <div className="flex h-full flex-col">
+      <Link href="/recordings" className="group flex items-center gap-2 p-5">
+        <AppIcon size={28} />
+        <span className="text-xl font-semibold text-fg">CaptureFlow</span>
+      </Link>
+
+      <div className="px-3 pb-4">
+        <WorkspaceSwitcher
+          currentWorkspaceId={current.workspace.id}
+          memberships={current.memberships}
+          memberCount={members.length}
+          recordingCount={recordingCount}
+          canInvite={isOwner}
+        />
+        <div className="mt-2.5 px-1">
+          <WorkspaceMembersStack items={memberItems} canInvite={isOwner} />
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <SidebarNav isOwner={isOwner} selfHosted={selfHosted} />
+      </div>
+
+      {/* Same 12px inset as the record button below, so the two line up. */}
+      <div className="px-3 pt-3">
+        <StorageUsage
+          usedBytes={usedBytes}
+          limitBytes={limitBytes >= UNLIMITED_STORAGE_BYTES ? null : limitBytes}
+          canUpgrade={!selfHosted}
+          email={session.user.email}
+          userId={session.user.id}
+        />
+      </div>
+
+      <div className="px-3 pt-3 pb-5">
+        <RecordButton label="Record a video" fullWidth />
+      </div>
+    </div>
+  );
+}

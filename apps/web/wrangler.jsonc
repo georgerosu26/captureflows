@@ -1,0 +1,72 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "captureflow-web",
+  // Custom worker wrapper: re-exports OpenNext's fetch handler + adds the
+  // scheduled() cron handlers (multipart GC + retention sweep). It imports
+  // ./.open-next/worker.js, produced by `opennextjs-cloudflare build`.
+  "main": "worker.ts",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  // The OpenNext output ships unminified; every cold start loads the whole
+  // script, so a third less to fetch and parse is a third off that stall.
+  "minify": true,
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS",
+  },
+  "observability": {
+    "enabled": true,
+  },
+  // Apex captureflow.dev routes to this worker as a Cloudflare Workers Custom
+  // Domain. Bind it once in the dashboard (Workers & Pages → captureflow-web →
+  // Settings → Domains & Routes → Add → Custom domain → captureflow.dev), which
+  // overrides the parked DNS record. This entry keeps it declarative so future
+  // deploys preserve the binding; custom_domain:true lets Cloudflare manage the
+  // apex DNS record for the worker.
+  "routes": [{ "pattern": "captureflow.dev", "custom_domain": true }],
+  // Cron Triggers → worker.ts scheduled(): hourly multipart GC + daily
+  // retention sweep against D1 + R2.
+  "triggers": {
+    "crons": ["0 * * * *", "0 4 * * *"],
+  },
+  // Create with `wrangler d1 create captureflow`, then paste the id.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "captureflow",
+      "database_id": "87523f52-ad6f-474f-85e8-87f267a98763",
+    },
+  ],
+  // All ported recording/screenshot r2.ts read env.BUCKET. Prefixes: videos/, posters/, screenshots/.
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "captureflow-recordings",
+    },
+  ],
+  // Cloudflare Email Service for invites and access requests; lib/email.ts
+  // falls back to Resend when it fails or is missing.
+  "send_email": [
+    { "name": "EMAIL", "allowed_sender_addresses": ["hello@captureflow.dev"] },
+  ],
+  "vars": {
+    "NEXT_PUBLIC_APP_WEB_SITE_URL": "https://captureflow.dev",
+    "NEXT_PUBLIC_RECORDING_SITE_URL": "https://captureflow.dev",
+    "NEXT_PUBLIC_SCREENSHOT_SITE_URL": "https://captureflow.dev",
+    "NEXT_PUBLIC_MARKETING_SITE_URL": "https://captureflow.dev",
+    "R2_PUBLIC_BASE_URL": "https://cdn.captureflow.dev",
+    "BETTER_AUTH_URL": "https://captureflow.dev",
+    // Floor for the nav's star badge, used only when the GitHub call fails
+    // (its rate limit is per-IP and Workers share egress IPs). Without it the
+    // badge disappears instead of holding its last known figure.
+    "NEXT_PUBLIC_GITHUB_STARS": "3",
+    // Desktop registers the captureflow:// scheme; keep it until the desktop
+    // deep-link parser is rebranded in lockstep.
+    "APP_DEEP_LINK_SCHEME": "captureflow",
+    // The only extension /auth/callback will hand a device token to. Production
+    // fails closed, so leaving this unset rejects every id — including the real
+    // one. Public value (a hash of the store item's key), hence a var not a secret.
+    "CAPTUREFLOW_EXTENSION_ID": "lgpgeoelaokbigdljofhkgbfnfcnmcol",
+    "NEXT_PUBLIC_LEMON_SQUEEZY_CHECKOUT_URL": "https://sardorml.lemonsqueezy.com/checkout/buy/775fbd57-6dea-4dee-9b27-4cc8aa664916",
+  },
+}
